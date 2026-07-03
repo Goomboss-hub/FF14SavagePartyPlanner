@@ -36,6 +36,7 @@
     <div class="sidebar-body" id="rosterList"></div>
     <div class="sidebar-footer">
       <button class="btn btn-outline" onclick="addPlayer()">＋ Add Player</button>
+      <button class="btn btn-outline" onclick="openModal()">⬆⬇ Import / Export</button>
       <button class="btn btn-primary" onclick="buildParty()" id="buildBtn">⚔ Build Party</button>
     </div>
   </aside>
@@ -86,6 +87,79 @@
       </div>
     </div>
   </main>
+</div>
+
+<!-- ── Import/Export Modal ── -->
+<div class="modal-backdrop" id="ioModal" onclick="closeModalOutside(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Import / Export Roster</h2>
+      <button class="modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-tabs">
+      <div class="modal-tab active" onclick="switchModalTab('export')">Export</div>
+      <div class="modal-tab" onclick="switchModalTab('import-json')">Import JSON</div>
+      <div class="modal-tab" onclick="switchModalTab('import-csv')">Import CSV</div>
+    </div>
+    <div class="modal-body">
+
+      <!-- Export -->
+      <div class="modal-section active" id="msec-export">
+        <span class="modal-label">Export as JSON</span>
+        <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px">Full fidelity — all roles, weights, and progression status. Best for reimporting later.</p>
+        <div class="export-row">
+          <button class="btn btn-gold" onclick="exportJSON()">⬇ Download JSON</button>
+          <button class="btn btn-outline" onclick="copyJSON()">⧉ Copy to clipboard</button>
+        </div>
+        <div style="height:16px"></div>
+        <span class="modal-label">Export as CSV</span>
+        <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px">Opens in Excel or Google Sheets. Columns: Player, Tank, Pure Healer, Barrier Healer, Melee, Ranged, Magical, Progression, Weight.</p>
+        <div class="export-row">
+          <button class="btn btn-gold" onclick="exportCSV()">⬇ Download CSV</button>
+          <button class="btn btn-outline" onclick="copyCSV()">⧉ Copy to clipboard</button>
+        </div>
+      </div>
+
+      <!-- Import JSON -->
+      <div class="modal-section" id="msec-import-json">
+        <div class="modal-drop" id="jsonDrop"
+          onclick="document.getElementById('jsonFile').click()"
+          ondragover="handleDragOver(event,'jsonDrop')"
+          ondragleave="handleDragLeave('jsonDrop')"
+          ondrop="handleDrop(event,'json')">
+          <span class="drop-icon">📂</span>
+          Click to browse or drag a <strong>.json</strong> file here
+        </div>
+        <input type="file" class="modal-file-input" id="jsonFile" accept=".json,application/json" onchange="handleFileInput(event,'json')">
+        <span class="modal-label" style="margin-top:12px">Or paste JSON</span>
+        <textarea class="modal-textarea" id="jsonPaste" placeholder='[{"name":"Talyn","tank":false,"purehealer":true,...}]'></textarea>
+        <div class="import-feedback" id="jsonFeedback"></div>
+      </div>
+
+      <!-- Import CSV -->
+      <div class="modal-section" id="msec-import-csv">
+        <div class="modal-drop" id="csvDrop"
+          onclick="document.getElementById('csvFile').click()"
+          ondragover="handleDragOver(event,'csvDrop')"
+          ondragleave="handleDragLeave('csvDrop')"
+          ondrop="handleDrop(event,'csv')">
+          <span class="drop-icon">📂</span>
+          Click to browse or drag a <strong>.csv</strong> file here
+        </div>
+        <input type="file" class="modal-file-input" id="csvFile" accept=".csv,text/csv" onchange="handleFileInput(event,'csv')">
+        <span class="modal-label" style="margin-top:12px">Or paste CSV</span>
+        <textarea class="modal-textarea" id="csvPaste" placeholder="Player,Tank,Pure Healer,Barrier Healer,Melee,Ranged,Magical,Progression,Weight
+Talyn,,,,,x,,Helper,1"></textarea>
+        <p style="font-size:10px;color:var(--text-dim);margin-top:6px">First row must be a header. Use <code style="color:var(--gold)">x</code> or <code style="color:var(--gold)">1</code> for roles. Progression column: "Progression" or "Helper".</p>
+        <div class="import-feedback" id="csvFeedback"></div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="importBtn" onclick="doImport()" style="display:none">⬆ Import Roster</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -519,6 +593,207 @@ function useDate(ds, label) {
     updateSlots([]);
     showFailure(pool, bestPartial);
   }
+}
+
+// ── Import / Export ───────────────────────────────────────────────────────────
+let currentModalTab = 'export';
+
+function openModal() {
+  document.getElementById('ioModal').classList.add('open');
+  switchModalTab('export');
+}
+function closeModal() { document.getElementById('ioModal').classList.remove('open'); }
+function closeModalOutside(e) { if (e.target === document.getElementById('ioModal')) closeModal(); }
+
+function switchModalTab(tab) {
+  currentModalTab = tab;
+  document.querySelectorAll('.modal-tab').forEach((t,i) => {
+    t.classList.toggle('active', ['export','import-json','import-csv'][i] === tab);
+  });
+  document.querySelectorAll('.modal-section').forEach(s => s.classList.remove('active'));
+  document.getElementById('msec-' + tab).classList.add('active');
+  document.getElementById('importBtn').style.display = tab === 'export' ? 'none' : 'inline-flex';
+  // clear feedback
+  ['jsonFeedback','csvFeedback'].forEach(id => {
+    const el = document.getElementById(id);
+    el.className = 'import-feedback'; el.textContent = '';
+  });
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+function rosterToJSON() {
+  return JSON.stringify(players.map(p => ({
+    name: p.name, tank: p.tank, purehealer: p.purehealer,
+    barrierhealer: p.barrierhealer, melee: p.melee,
+    ranged: p.ranged, magical: p.magical,
+    progression: p.progression, weight: p.weight
+  })), null, 2);
+}
+
+function rosterToCSV() {
+  const header = 'Player,Tank,Pure Healer,Barrier Healer,Melee,Ranged,Magical,Progression,Weight';
+  const rows = players.map(p =>
+    [p.name, p.tank?'x':'', p.purehealer?'x':'', p.barrierhealer?'x':'',
+     p.melee?'x':'', p.ranged?'x':'', p.magical?'x':'',
+     p.progression?'Progression':'Helper', p.weight].join(',')
+  );
+  return [header, ...rows].join('\n');
+}
+
+function downloadFile(content, filename, mime) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([content], {type: mime}));
+  a.download = filename; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportJSON() { downloadFile(rosterToJSON(), 'ffxiv-roster.json', 'application/json'); }
+function exportCSV()  { downloadFile(rosterToCSV(),  'ffxiv-roster.csv',  'text/csv'); }
+
+function copyJSON() { navigator.clipboard.writeText(rosterToJSON()).then(() => showToast('JSON copied!')); }
+function copyCSV()  { navigator.clipboard.writeText(rosterToCSV()).then(()  => showToast('CSV copied!')); }
+
+// ── Import ────────────────────────────────────────────────────────────────────
+function handleDragOver(e, dropId) {
+  e.preventDefault();
+  document.getElementById(dropId).classList.add('dragover');
+}
+function handleDragLeave(dropId) {
+  document.getElementById(dropId).classList.remove('dragover');
+}
+function handleDrop(e, fmt) {
+  e.preventDefault();
+  const dropId = fmt === 'json' ? 'jsonDrop' : 'csvDrop';
+  document.getElementById(dropId).classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) readFile(file, fmt);
+}
+function handleFileInput(e, fmt) {
+  const file = e.target.files[0];
+  if (file) readFile(file, fmt);
+}
+function readFile(file, fmt) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const pasteId = fmt === 'json' ? 'jsonPaste' : 'csvPaste';
+    document.getElementById(pasteId).value = ev.target.result;
+    setFeedback(fmt, 'ok', `File loaded: ${file.name} — click Import Roster to apply.`);
+  };
+  reader.readAsText(file);
+}
+
+function setFeedback(fmt, type, msg) {
+  const el = document.getElementById(fmt + 'Feedback');
+  el.className = 'import-feedback ' + type;
+  el.textContent = msg;
+}
+
+function doImport() {
+  if (currentModalTab === 'import-json') importJSON();
+  else if (currentModalTab === 'import-csv') importCSV();
+}
+
+function importJSON() {
+  const raw = document.getElementById('jsonPaste').value.trim();
+  if (!raw) { setFeedback('json','err','Nothing to import — paste JSON or load a file.'); return; }
+  try {
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) throw new Error('Expected a JSON array.');
+    applyImport(data.map(normalisePlayer));
+    setFeedback('json','ok',`✓ Imported ${data.length} player(s) successfully.`);
+  } catch(e) {
+    setFeedback('json','err','Invalid JSON: ' + e.message);
+  }
+}
+
+function importCSV() {
+  const raw = document.getElementById('csvPaste').value.trim();
+  if (!raw) { setFeedback('csv','err','Nothing to import — paste CSV or load a file.'); return; }
+  try {
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) throw new Error('Need at least a header row and one player.');
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const find = (...keys) => { for (const k of keys) { const i = headers.indexOf(k); if (i>=0) return i; } return -1; };
+    const ci = {
+      name:         find('player','name'),
+      tank:         find('tank'),
+      purehealer:   find('pure healer','purehealer','pure_healer'),
+      barrierhealer:find('barrier healer','barrierhealer','barrier_healer'),
+      melee:        find('melee'),
+      ranged:       find('ranged'),
+      magical:      find('magical'),
+      progression:  find('progression','progression/helper','status'),
+      weight:       find('weight')
+    };
+    if (ci.name === -1) throw new Error('Could not find a "Player" or "Name" column.');
+    const isMarked = v => v && ['x','1','true','yes'].includes(String(v).trim().toLowerCase());
+    const data = lines.slice(1).map(line => {
+      const cols = line.split(',');
+      const get = i => i >= 0 ? (cols[i]||'').trim() : '';
+      return normalisePlayer({
+        name:          get(ci.name),
+        tank:          isMarked(get(ci.tank)),
+        purehealer:    isMarked(get(ci.purehealer)),
+        barrierhealer: isMarked(get(ci.barrierhealer)),
+        melee:         isMarked(get(ci.melee)),
+        ranged:        isMarked(get(ci.ranged)),
+        magical:       isMarked(get(ci.magical)),
+        progression:   get(ci.progression).toLowerCase() === 'progression',
+        weight:        ci.weight >= 0 ? (parseInt(get(ci.weight))||1) : 1
+      });
+    }).filter(p => p.name);
+    if (data.length === 0) throw new Error('No valid player rows found.');
+    applyImport(data);
+    setFeedback('csv','ok',`✓ Imported ${data.length} player(s) successfully.`);
+  } catch(e) {
+    setFeedback('csv','err','Import failed: ' + e.message);
+  }
+}
+
+function normalisePlayer(raw) {
+  return {
+    name:          String(raw.name||'').trim(),
+    tank:          !!raw.tank,
+    purehealer:    !!(raw.purehealer || raw['pure healer'] || raw['pure_healer']),
+    barrierhealer: !!(raw.barrierhealer || raw['barrier healer'] || raw['barrier_healer']),
+    melee:         !!raw.melee,
+    ranged:        !!raw.ranged,
+    magical:       !!raw.magical,
+    progression:   !!raw.progression,
+    weight:        parseInt(raw.weight)||1
+  };
+}
+
+function applyImport(data) {
+  // Merge: update existing players by name, add new ones
+  const existingByName = {};
+  players.forEach(p => { existingByName[p.name.toLowerCase()] = p; });
+  data.forEach(d => {
+    const existing = existingByName[d.name.toLowerCase()];
+    if (existing) {
+      Object.assign(existing, d); // update in place
+    } else {
+      const p = { ...d, id: nextId++ };
+      players.push(p);
+      availability[p.id] = {};
+    }
+  });
+  renderRoster();
+  setTimeout(closeModal, 800);
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function showToast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--navy-mid);border:1px solid var(--gold-dim);color:var(--gold);padding:8px 18px;border-radius:4px;font-size:12px;z-index:200;transition:opacity 0.3s;font-family:Cinzel,serif;letter-spacing:0.06em';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg; t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.opacity = '0', 2000);
 }
 
 // ── Util ──────────────────────────────────────────────────────────────────────
