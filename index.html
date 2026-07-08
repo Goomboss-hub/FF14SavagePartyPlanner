@@ -10,7 +10,7 @@
 <!-- Firebase SDK -->
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import { getDatabase, ref, onValue, set, update, remove }
+import { getDatabase, ref, onValue, set, update, remove, runTransaction, get }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ const app = initializeApp(FIREBASE_CONFIG);
 const db  = getDatabase(app);
 
 // Expose Firebase helpers to the rest of the app
-window._fb = { db, ref, onValue, set, update, remove };
+window._fb = { db, ref, onValue, set, update, remove, runTransaction, get };
 window.dispatchEvent(new Event('firebase-ready'));
 </script>
 </head>
@@ -265,18 +265,65 @@ function generateCode() {
   return Array.from({length:6}, () => chars[Math.floor(Math.random()*chars.length)]).join('');
 }
 
+// Delete rooms with no activity in the last 2 weeks (runs opportunistically on room create)
+async function purgeStaleRooms() {
+  const { db, ref, get, remove } = window._fb;
+  const TWO_WEEKS_MS = 14 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - TWO_WEEKS_MS;
+  try {
+    const snap = await get(ref(db, 'rooms'));
+    if (!snap.exists()) return;
+    const rooms = snap.val();
+    const deletions = Object.entries(rooms)
+      .filter(([, room]) => {
+        const lastActive = room.lastActive || room.created || 0;
+        return lastActive < cutoff;
+      })
+      .map(([code]) => remove(ref(db, `rooms/${code}`)));
+    await Promise.all(deletions);
+    if (deletions.length) console.log(`Purged ${deletions.length} stale room(s).`);
+  } catch(e) {
+    console.warn('Stale room purge failed (non-critical):', e.message);
+  }
+}
+
+// Collision-free room creation: uses runTransaction to atomically claim a code
 async function createRoom() {
   if (!fbReady) { showLobbyError('Firebase not ready yet, please wait.'); return; }
-  const code = generateCode();
   showLobbySpinner(true);
-  try {
-    const { db, ref, set } = window._fb;
-    await set(ref(db, `rooms/${code}`), { players: [], availability: {}, created: Date.now() });
-    enterRoom(code);
-  } catch(e) {
-    showLobbyError('Could not create room: ' + e.message);
-    showLobbySpinner(false);
+
+  // Opportunistically clean up stale rooms before creating a new one
+  await purgeStaleRooms();
+
+  const { db, ref, runTransaction } = window._fb;
+  const MAX_ATTEMPTS = 10;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const code = generateCode();
+    const roomRef = ref(db, `rooms/${code}`);
+    let claimed = false;
+
+    try {
+      await runTransaction(roomRef, existing => {
+        // If slot is already occupied, abort transaction (return undefined)
+        if (existing !== null) return undefined;
+        // Slot is free — write initial room data atomically
+        claimed = true;
+        return { players: [], availability: {}, created: Date.now(), lastActive: Date.now() };
+      });
+    } catch(e) {
+      // Transaction aborted means code was taken; try next attempt
+      continue;
+    }
+
+    if (claimed) {
+      enterRoom(code);
+      return;
+    }
   }
+
+  showLobbyError('Could not find a free room code after several attempts. Please try again.');
+  showLobbySpinner(false);
 }
 
 async function joinRoom() {
@@ -285,13 +332,16 @@ async function joinRoom() {
   if (code.length !== 6) { showLobbyError('Please enter a 6-character room code.'); return; }
   showLobbySpinner(true);
   try {
-    // Verify room exists by attempting to read it
-    const { db, ref, onValue } = window._fb;
-    const roomRef = ref(db, `rooms/${code}`);
-    onValue(roomRef, snap => {}, { onlyOnce: false }); // triggers connection test
+    const { db, ref, get } = window._fb;
+    const snap = await get(ref(db, `rooms/${code}`));
+    if (!snap.exists()) {
+      showLobbyError(`Room "${code}" does not exist. Check the code and try again.`);
+      showLobbySpinner(false);
+      return;
+    }
     enterRoom(code);
   } catch(e) {
-    showLobbyError('Room not found or connection failed.');
+    showLobbyError('Connection failed: ' + e.message);
     showLobbySpinner(false);
   }
 }
@@ -358,16 +408,18 @@ function copyRoomLink() {
 }
 
 // Debounced write — batches rapid edits into one Firebase write per 600ms
+// Also stamps lastActive so stale room cleanup knows when a room was last used
 function pushToFirebase() {
   if (!currentRoom || !fbReady) return;
   setSyncStatus('pending');
   clearTimeout(syncTimeout);
   syncTimeout = setTimeout(async () => {
     try {
-      const { db, ref, set } = window._fb;
+      const { db, ref, set, update } = window._fb;
       ignoreNextRemoteUpdate = true;
       await set(ref(db, `rooms/${currentRoom}/players`), players);
       await set(ref(db, `rooms/${currentRoom}/availability`), availability);
+      await update(ref(db, `rooms/${currentRoom}`), { lastActive: Date.now() });
       setSyncStatus('synced');
     } catch(e) {
       setSyncStatus('error');
@@ -382,9 +434,10 @@ function pushAvailability() {
   clearTimeout(syncTimeout);
   syncTimeout = setTimeout(async () => {
     try {
-      const { db, ref, set } = window._fb;
+      const { db, ref, set, update } = window._fb;
       ignoreNextRemoteUpdate = true;
       await set(ref(db, `rooms/${currentRoom}/availability`), availability);
+      await update(ref(db, `rooms/${currentRoom}`), { lastActive: Date.now() });
       setSyncStatus('synced');
     } catch(e) { setSyncStatus('error'); }
   }, 600);
